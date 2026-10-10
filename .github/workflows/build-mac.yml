@@ -1,0 +1,265 @@
+# INGENIUM  |  Copyright (c) 2026 Yannie D. Forest. All rights reserved.
+# NO LICENCE IS GRANTED. See LICENCE.txt.
+#
+# Builds the Mac apps in GitHub's cloud, one after the other: for Intel Macs,
+# and (R70) for Macs with Apple silicon, such as a Mac mini, whose engine uses
+# the graphics chip (Metal). Each gets the native engine (llama.cpp, compiled
+# here once and then kept in the build cache), its built-in models and the
+# app itself; then the app must answer a question with its own engine, and
+# its thinking model must think, before it is published on the Releases page.
+#
+# Cost: this repository is private, and GitHub counts every minute on a Mac
+# ten times against the free monthly allowance. Each app with the engine
+# already cached takes about 6 to 12 minutes (60 to 120 allowance minutes);
+# the first Apple silicon build compiles its engine too.
+name: Build Ingenium for Mac
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'ingenium.html'
+      - 'ingenium_app.py'
+      - 'ingenium.spec'
+      - 'app.json'
+      - 'desktop_model.json'
+      - 'tools/**'
+      - '.github/workflows/build-mac.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: mac-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    name: mac (${{ matrix.chip }})
+    strategy:
+      fail-fast: false
+      # one at a time: both apps go on the same Releases page
+      max-parallel: 1
+      matrix:
+        include:
+          - chip: Intel
+            runner: macos-15-intel
+            plat: macos-x64
+            models: desktop
+            zip: Mac-Intel
+          - chip: Apple silicon
+            runner: macos-15
+            plat: macos-arm64
+            models: mac-arm
+            zip: Mac-Apple-Silicon
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      INGENIUM_CHIP: ${{ matrix.chip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Read who the app is (app.json)
+        run: |
+          python3 - >> "$GITHUB_ENV" <<'PY'
+          import json, re
+          c = json.load(open("app.json"))
+          name = re.sub(r"\s+", " ", re.sub(r"[^A-Za-z0-9 ._-]", "", str(c.get("name") or ""))).strip() or "Ingenium"
+          file = re.sub(r"[^A-Za-z0-9._-]", "", str(c.get("file_name") or "")) or "Ingenium"
+          print("APP_NAME=" + name)
+          print("APP_FILE=" + file)
+          PY
+
+      - name: The engine, from the build cache when it was compiled before
+        id: engine
+        uses: actions/cache@v4
+        with:
+          path: engine/${{ matrix.plat }}
+          # one compile per engine release: change v1 to v2 to compile again
+          key: engine-${{ matrix.plat }}-b11321-portable-v1
+
+      - name: Compile the engine (llama.cpp b11321; only when not cached)
+        if: steps.engine.outputs.cache-hit != 'true'
+        run: |
+          command -v cmake || brew install cmake
+          bash tools/build_engine_mac.sh engine/${{ matrix.plat }} portable "$RUNNER_TEMP/engine-build"
+
+      # R78: llama.cpp's trainer (llama-finetune), for "Train a small model from
+      # zero": compiled once from the same release, for the processor only, and
+      # kept in its own build cache, so the engine is not compiled again
+      - name: The trainer, from the build cache when it was compiled before
+        id: trainer
+        uses: actions/cache@v4
+        with:
+          path: engine-trainer/${{ matrix.plat }}
+          key: trainer-${{ matrix.plat }}-b11321-v1
+
+      - name: Compile the trainer (llama.cpp b11321; only when not cached)
+        if: steps.trainer.outputs.cache-hit != 'true'
+        run: |
+          command -v cmake || brew install cmake
+          bash tools/build_engine_mac.sh engine-trainer/${{ matrix.plat }} trainer "$RUNNER_TEMP/engine-build"
+
+      - name: The trainer joins the engine
+        run: |
+          cp engine-trainer/${{ matrix.plat }}/llama-finetune engine/${{ matrix.plat }}/llama-finetune
+          chmod 755 engine/${{ matrix.plat }}/llama-finetune
+
+      - name: The built-in models, from the build cache when they were downloaded before
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ingenium-models
+          key: model-${{ hashFiles('desktop_model.json') }}
+
+      - name: Get the built-in models (each checked against its SHA-256)
+        run: |
+          # the built-in models must be the ones the page's lineup names (R70)
+          python3 tools/check_lineup.py
+          python3 tools/prepare_desktop_model.py "$RUNNER_TEMP/models" ${{ matrix.models }}
+
+      - name: Install the build tools
+        run: python3 -m pip install --disable-pip-version-check pyinstaller==6.22.3 pywebview==6.2.1
+
+      - name: The edit panel's clipboard (R78), copied and pasted through the app's own code
+        continue-on-error: true
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python3 - <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import sys
+          sys.path.insert(0, ".")
+          import ingenium_app as a
+          t = "Ingenium paste test \u2713 https://example.org/live?id=42&ref=outside"
+          w = a._clipboard_write(t)
+          r = a._clipboard_read()
+          ok = bool(w.get("ok")) and bool(r.get("ok")) and r.get("text") == t
+          print("* Clipboard through the app: %s (write %s; read back %s)" % ("works" if ok else "FAILED", w, ascii((r.get("text") if r.get("ok") else r.get("error")) or "")[:90]))
+          sys.exit(0 if ok else 1)
+          EOF
+
+      - name: Training from zero (R78), through the app's own code with its own engine
+        continue-on-error: true
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          echo "### Training a small model from zero" >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/train_smoke.py | tee -a "$GITHUB_STEP_SUMMARY"
+          exit ${PIPESTATUS[0]}
+
+      - name: Build the app
+        run: |
+          # the build number: the version, the day and this repository's run number;
+          # the app shows it in About (stamped into the page) and macOS in Get Info
+          V="3.2.$(date -u +%Y%m%d).${{ github.run_number }}"
+          echo "INGENIUM_VERSION=$V" >> "$GITHUB_ENV"
+          python3 tools/stamp_build.py ingenium.html "$V"
+          INGENIUM_VERSION="$V" python3 -m PyInstaller --noconfirm --clean ingenium.spec
+
+      - name: Put the engine and the models inside, and seal the app
+        run: bash tools/finish_mac_app.sh "dist/${APP_FILE}.app" engine/${{ matrix.plat }} "$RUNNER_TEMP/models"
+
+      - name: Get Velox's speed-up file for the test (not carried in the app; checked by SHA-256)
+        continue-on-error: true
+        run: |
+          curl -sSL --retry 4 --max-time 600 -o "$RUNNER_TEMP/speedup.gguf" "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-DSpark-GGUF/resolve/main/LFM2.5-1.2B-Instruct-DSpark-Q4_K_M.gguf"
+          echo "5cf9bb2947638dd74a47b486b817f407831c0da420aeebb6973fb66c25af51e4  $RUNNER_TEMP/speedup.gguf" | shasum -a 256 -c - || rm -f "$RUNNER_TEMP/speedup.gguf"
+
+      - name: Self-test (the app's own engine must answer with its built-in model)
+        run: |
+          set +e
+          WHICH=none; [ -f "dist/${APP_FILE}.app/Contents/Resources/models/builtin.json" ] && WHICH=builtin
+          SPD=(); [ -f "$RUNNER_TEMP/speedup.gguf" ] && SPD=(--selftest-drafter "$RUNNER_TEMP/speedup.gguf")
+          "dist/${APP_FILE}.app/Contents/MacOS/${APP_FILE}" --selftest-model "$WHICH" --selftest-out "$RUNNER_TEMP/selftest.json" "${SPD[@]}" --selftest-share
+          code=$?
+          set -e
+          python3 - "$RUNNER_TEMP/selftest.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          t = r.get("timings") or {}
+          print("### Mac (%s) self-test %s" % (__import__("os").environ.get("INGENIUM_CHIP", ""), "passed" if r.get("ok") else "FAILED"))
+          print("* Engine: %s, %s" % ((r.get("engine") or {}).get("version"), (r.get("engine") or {}).get("platform")))
+          print("* Model: %s, loaded in %s s" % ((r.get("builtin") or {}).get("name"), r.get("load_seconds")))
+          print("* Reply: `%s` at %.1f tokens a second" % (r.get("reply"), t.get("predicted_per_second") or 0))
+          print("* Refuses requests without the session key: %s" % r.get("locked"))
+          th = r.get("think") or {}
+          if th: print("* Thinking model %s thought (%s characters): `%s`" % (th.get("model"), th.get("chars"), (th.get("text") or "")[:90].replace("\n", " ")))
+          sp = r.get("speedup") or {}
+          if sp: print("* Speed-up file: %s; %.1f and %.1f tokens a second without it (before and after), %.1f with it (%s guesses taken of %s); same reply: %s%s" % (
+              "used" if sp.get("used") else "NOT used", ((sp.get("without") or {}).get("per_second") or 0), ((sp.get("again") or {}).get("per_second") or 0),
+              ((sp.get("with") or {}).get("per_second") or 0),
+              (sp.get("with") or {}).get("accepted"), (sp.get("with") or {}).get("drafted"), sp.get("same_reply"), (" (" + sp["error"] + ")") if sp.get("error") else ""))
+          sh = r.get("share") or {}
+          if sh: print("* Lending its models to other devices (R74): %s; reached at %s (%s); wrong code refused: %s; reply `%s`, first word after %.2f s%s" % (
+              "works" if sh.get("ok") else "FAILED", sh.get("address"), "over the network" if sh.get("over_network") else "on this machine only",
+              sh.get("refuses_wrong_code"), sh.get("reply"), sh.get("first_word_seconds") or 0, (" (" + sh["error"] + ")") if sh.get("error") else ""))
+          if r.get("error"): print("* Error: %s" % r["error"])
+          PY
+          if [ "$code" != 0 ]; then cat "$RUNNER_TEMP/selftest.json"; echo "::error::the app's engine did not answer correctly"; exit 1; fi
+
+      - name: Check the oldest macOS each program file in the app needs
+        # R74: the release says "macOS 13.3 or newer"; this proves it file by file
+        run: |
+          python3 - "dist/${APP_FILE}.app" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import os, re, subprocess, sys
+          app = sys.argv[1]; worst = (0, 0); rows = []
+          for root, _d, files in os.walk(app):
+              for f in files:
+                  p = os.path.join(root, f)
+                  if os.path.islink(p) or os.path.getsize(p) < 4096:
+                      continue
+                  with open(p, "rb") as fh:
+                      magic = fh.read(4)
+                  if magic not in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xce\xfa\xed\xfe"):
+                      continue
+                  out = subprocess.run(["otool", "-l", p], capture_output=True, text=True).stdout
+                  # only LC_BUILD_VERSION (minos) and LC_VERSION_MIN_MACOSX (version) state it
+                  want, v = None, None
+                  for line in out.splitlines():
+                      t = line.strip()
+                      if t in ("cmd LC_BUILD_VERSION", "cmd LC_VERSION_MIN_MACOSX"):
+                          want = "minos" if t.endswith("BUILD_VERSION") else "version"
+                      elif want and t.startswith(want + " "):
+                          m = re.match(r"\w+ (\d+)\.(\d+)", t)
+                          if m:
+                              v = max(v or (0, 0), (int(m.group(1)), int(m.group(2))))
+                          want = None
+                  if v:
+                      worst = max(worst, v)
+                      rows.append((v, os.path.relpath(p, app)))
+          rows.sort(reverse=True)
+          print("### Oldest macOS the app runs on: %d.%d" % worst)
+          for v, f in rows[:5]:
+              print("* %d.%d: `%s`" % (v[0], v[1], f))
+          if worst > (13, 3):
+              print("* **Newer than the 13.3 the release promises.**")
+              sys.exit(1)
+          PY
+
+      - name: Zip the app (alone, and with its models)
+        run: |
+          # R74: the app alone is the main download; it fetches its models the
+          # first time it opens. The copy with the models is for a Mac without internet.
+          ditto -c -k --sequesterRsrc --keepParent "dist/${APP_FILE}.app" "$RUNNER_TEMP/${APP_FILE}-${{ matrix.zip }}-with-models.zip"
+          rm -rf "$RUNNER_TEMP/lite" && mkdir -p "$RUNNER_TEMP/lite"
+          ditto "dist/${APP_FILE}.app" "$RUNNER_TEMP/lite/${APP_FILE}.app"
+          rm -rf "$RUNNER_TEMP/lite/${APP_FILE}.app/Contents/Resources/models"
+          codesign --force --sign - --timestamp=none "$RUNNER_TEMP/lite/${APP_FILE}.app"
+          # the app alone must still start and run its engine
+          "$RUNNER_TEMP/lite/${APP_FILE}.app/Contents/MacOS/${APP_FILE}" --selftest-model none --selftest-out "$RUNNER_TEMP/lite.json"
+          python3 -c "import json,sys;r=json.load(open(sys.argv[1]));print('* The app alone (no models): engine runs: %s' % r.get('ok'))" "$RUNNER_TEMP/lite.json" >> "$GITHUB_STEP_SUMMARY"
+          ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/lite/${APP_FILE}.app" "$RUNNER_TEMP/${APP_FILE}-${{ matrix.zip }}.zip"
+          ls -la "$RUNNER_TEMP"/*.zip
+
+      - name: Publish to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -- "$RUNNER_TEMP/${APP_FILE}-${{ matrix.zip }}.zip" "${APP_FILE}-${{ matrix.zip }}.zip"
+          if [ -d "dist/${APP_FILE}.app/Contents/Resources/models" ]; then set -- "$@" "$RUNNER_TEMP/${APP_FILE}-${{ matrix.zip }}-with-models.zip" "${APP_FILE}-${{ matrix.zip }}-with-models.zip"; fi
+          # R74: the name used before the app alone became the main download is retired
+          OBSOLETE="${APP_FILE}-${{ matrix.zip }}-no-model.zip" bash tools/publish_release.sh Mac "$@"
