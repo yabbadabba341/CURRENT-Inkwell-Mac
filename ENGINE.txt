@@ -1,0 +1,62 @@
+INGENIUM  |  Copyright (c) 2026 Yannie D. Forest. All rights reserved.
+NO LICENCE IS GRANTED. See LICENCE.txt.
+------------------------------------------------------------------------
+
+The engine
+==========
+
+R65: the Mac app now carries its own engine
+-------------------------------------------
+The app built by "Build Mac App.command" (or by the cloud build) carries
+llama.cpp's own server, compiled for the Mac (tools/build_engine_mac.sh,
+release b11321). The app starts it on this Mac only (a loopback address that
+nothing outside the Mac can reach, and that refuses any request without the
+app's private key), loads the model you choose, and stops it when the app
+closes. It is many times faster than the engine inside the page, and it opens
+model files of any size. If a model cannot load, the app says why in plain
+words. The engine inside the page (below) stays as the fallback, and is the
+engine when ingenium.html is opened in a browser.
+
+The engine inside the page
+--------------------------
+Ingenium runs your GGUF models with a local engine called wllama, which is
+llama.cpp compiled to WebAssembly. The engine now comes INSIDE ingenium.html.
+There is nothing to download or add: open the file, or build the app, and
+the engine is there. The Models page shows "Status: embedded in this file".
+
+What changed (R64)
+------------------
+* The engine is baked in already, compressed, so the file is about 9 MB.
+* Opened by double-clicking (a file:// address) the engine used to wait at
+  "Loading model 95%" for ever, because the browser refused its worker. It now
+  starts, and if a worker ever fails the load stops with a reason.
+* In Safari and in the Mac app's window the engine used to fail at once with
+  "No supported storage backend found". That check is no longer reached.
+* Safari and the Mac app window run the "compat" version of the engine, which
+  is slower than in Chrome or Edge. The first load of a model can take a while
+  there before the first answer.
+* In the Mac app, model files chosen on the Models page are linked where they
+  are instead of being copied in, so a large file is ready at once.
+* WebAssembly can address at most 4 GB, so model files much larger than
+  about 2 to 3 GB are unlikely to open with this engine (an estimate).
+
+Re-baking (only if you ever need to)
+------------------------------------
+"Bake Engine.command" (or python3 bake_engine.py ingenium.html) checks the
+engine and does nothing when it is already inside. To bake again from
+scratch, add --force. Every engine file is checked against a pinned SHA-256
+checksum, so a damaged or altered download is refused.
+
+If the download is refused on your Mac, make a folder named  engine  beside
+ingenium.html, save these four files into it under exactly these names, and
+run the bake again. It then uses the files and needs no network:
+
+  engine/wllama.esm.js       https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/index.min.js
+  engine/wllama.wasm         https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/wasm/wllama.wasm
+  engine/wllama.compat.js    https://cdn.jsdelivr.net/npm/@wllama/wllama-compat@3.6.1/wasm/wllama.js
+  engine/wllama.compat.wasm  https://cdn.jsdelivr.net/npm/@wllama/wllama-compat@3.6.1/wasm/wllama.wasm
+
+On iPhone and iPad
+------------------
+The Ingenium-Fire- repository now builds a real iPhone and iPad app with a
+faster native engine and a model built in. See INSTALL_MOBILE.md there.

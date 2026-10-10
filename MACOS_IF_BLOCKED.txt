@@ -1,0 +1,121 @@
+INGENIUM  |  Copyright (c) 2026 Yannie D. Forest. All rights reserved.
+NO LICENCE IS GRANTED. No copying, adaptation, redistribution, reverse
+engineering or commercial use without the author's written permission.
+See LICENCE.txt. Every distributed copy carries a build marker.
+--------------------------------------------------------------------------
+
+Ingenium on macOS: what to do if something will not open
+===========================================================
+
+If the download or the unzip fails (R74)
+----------------------------------------
+Download the app alone: Ingenium-Mac-Intel.zip for an Intel Mac, or
+Ingenium-Mac-Apple-Silicon.zip for an M1 or later. It is about 30 MB, so it
+downloads and unzips quickly. The first time it opens, the app downloads its
+two models itself (about 2 GB, once), shows the progress, and if the
+connection drops it carries on from where it stopped. The "-with-models"
+file holds everything in one 2 GB download; it breaks more easily over
+Wi-Fi and needs about 4 GB of free space to unzip.
+
+To check your Mac: Apple menu, About This Mac. It shows the chip (Intel, or
+Apple M1 and later) and the macOS version. The cloud-built app's fast engine
+needs macOS 13.3 or newer. On an older macOS the app still opens, says so on
+the Models page, and runs models in the slower engine inside the page;
+updating macOS is free (System Settings, General, Software Update), or build
+the app on the Mac itself with "Build Mac App.command".
+
+
+If the downloaded app will not open
+-----------------------------------
+  1. Drag Ingenium.app to Applications and double-click it. Let macOS
+     refuse it.
+  2. Open System Settings, Privacy & Security, scroll down, and choose
+     Open Anyway for Ingenium. Confirm. You do this once.
+On some older macOS versions, right-clicking the app and choosing Open, then
+Open again, does the same. Or, in Terminal:
+
+         xattr -dr com.apple.quarantine /Applications/Ingenium.app
+
+The sections below are about the build script, "Build Mac App.command".
+
+
+If macOS shows a message like
+
+    "Apple could not verify 'Build Mac App.command' is free of malware
+     that may harm your Mac or compromise your privacy."
+
+then nothing is wrong with the file. This is macOS Gatekeeper. It is not
+saying it scanned the file and found something. It is saying it has no proof
+from Apple that the file was checked, so it refuses to run it. Any file
+downloaded from the internet that has not been through Apple's paid
+notarization service gets this treatment, including plain text scripts like
+this one.
+
+Pick whichever option below suits you.
+
+
+OPTION 1 (recommended, nothing to disable): run it from Terminal
+---------------------------------------------------------------
+Gatekeeper guards double-clicking in Finder. It does not stand in the way
+when you run the build yourself in Terminal.
+
+  1. Open Terminal (press Command+Space, type "Terminal", press Return).
+  2. Type  cd  followed by a space.
+  3. Drag this folder from Finder onto the Terminal window, then press Return.
+  4. Type this and press Return:
+
+         bash "Build Mac App.command"
+
+The build runs as normal. Nothing needs to be disabled or approved.
+
+
+OPTION 2: remove the download quarantine, then double-click
+-----------------------------------------------------------
+This clears the "downloaded from the internet" flag on this folder only.
+
+  1. Open Terminal.
+  2. Type  xattr -dr com.apple.quarantine  followed by a space.
+  3. Drag this folder onto the Terminal window, then press Return.
+
+You can now double-click "Build Mac App.command" normally.
+
+
+OPTION 3: approve it once in System Settings
+--------------------------------------------
+  1. Double-click the script. Let macOS refuse it.
+  2. Open System Settings, go to Privacy & Security.
+  3. Scroll down. There should be a note about the blocked file with an
+     "Open Anyway" button. Click it and confirm.
+
+Note: on some macOS versions you can instead right-click the file and choose
+Open. Apple has tightened this over time and the exact wording and steps
+differ between macOS versions, so if what you see does not match, Option 1
+always works.
+
+
+Why this happens, briefly
+-------------------------
+Apple's notarization is a service where software is submitted to Apple,
+scanned, and issued a ticket that macOS can check. It requires a paid Apple
+Developer account and a Mac to sign and submit from. These are small plain
+scripts and have not been through that process, so macOS has no ticket to
+check and warns you. The same warning appears for a great deal of legitimate
+open source software.
+
+
+The simplest alternative (no build at all)
+------------------------------------------
+Ingenium is one self-contained file. You do not need the built app.
+
+  Option A - immediate:
+    Double-click ingenium.html. It opens in your browser and works fully
+    offline. This always works.
+
+  Option B - a real app window with the Ingenium seal in your Dock:
+    1. Put ingenium.html online with any free static host
+       (e.g. drag the folder onto app.netlify.com/drop, or GitHub Pages).
+    2. Open that address in Safari.
+    3. File > Add to Dock.
+    It then behaves like a native app, with its own window and the seal as
+    its icon, and works offline afterwards. No Python, no build, no security
+    prompts.
